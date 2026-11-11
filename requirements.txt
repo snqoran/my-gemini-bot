@@ -4,3 +4,5 @@ google-genai
 ask-sdk-core
 ask-sdk-model
 ask-sdk-webservice-support
+# Fix oscrypto's OpenSSL 3.x version detection on Render (upstream commit).
+oscrypto @ git+https://github.com/wbond/oscrypto.git@d5f3437ed24257895ae1edd9e503cfb352e635a8
