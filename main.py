@@ -8,7 +8,7 @@ import wave
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.concurrency import run_in_threadpool
-from alexa_security import validate_alexa_request
+from alexa_security import validate_alexa_request, AlexaValidationError
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -149,9 +149,11 @@ async def alexa_skill(request: Request):
     try:
         raw = await request.body()
         data = await run_in_threadpool(validate_alexa_request, dict(request.headers), raw)
+    except AlexaValidationError as exc:
+        logger.warning("Rejected Alexa request: stage=%s category=%s", exc.stage, exc.category)
+        raise HTTPException(status_code=400, detail="Invalid Alexa request")
     except Exception as exc:
-        # Never disclose certificate details, keys, raw requests or signatures.
-        logger.warning("Rejected Alexa request (%s)", type(exc).__name__)
+        logger.warning("Rejected Alexa request: stage=unexpected category=%s", type(exc).__name__)
         raise HTTPException(status_code=400, detail="Invalid Alexa request")
 
     req = data.get("request") or {}
