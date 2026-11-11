@@ -19,7 +19,7 @@ def validate_alexa_request(headers, raw_body: bytes) -> dict:
     envelope = DefaultSerializer().deserialize(text, RequestEnvelope)
 
     # The SHA-256 signature is calculated over the *original* request body.
-    RequestVerifier(signature_key="Signature-256").verify(headers, text, envelope)
+    RequestVerifier().verify(headers, text, envelope)
     TimestampVerifier().verify(headers, text, envelope)
 
     session_app = (payload.get("session") or {}).get("application") or {}
