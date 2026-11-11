@@ -9,12 +9,13 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from google import genai
+from google.genai import types
 
 app = FastAPI(title="Gemini Alexa Bridge")
 logger = logging.getLogger(__name__)
 
 api_key = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key) if api_key else None
+client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1alpha")) if api_key else None
 MODEL_NAME = "gemini-3.8-flash"
 
 PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
