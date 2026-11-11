@@ -7,6 +7,8 @@ import io
 import wave
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.concurrency import run_in_threadpool
+from alexa_security import validate_alexa_request
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -143,39 +145,82 @@ async def test_live(body: ChatInput):
 
 @app.post("/alexa")
 async def alexa_skill(request: Request):
-    # تنبيه: يجب التحقق من توقيع Amazon قبل استخدام هذا المسار في مهارة حقيقية.
+    """Alexa Custom Skill endpoint: verified requests, Live-generated text, Alexa voice."""
     try:
-        data = await request.json()
-        req = data["request"]
-        request_type = req["type"]
-    except (ValueError, KeyError, TypeError):
-        raise HTTPException(status_code=400, detail="طلب Alexa غير صالح")
+        raw = await request.body()
+        data = await run_in_threadpool(validate_alexa_request, dict(request.headers), raw)
+    except Exception as exc:
+        # Never disclose certificate details, keys, raw requests or signatures.
+        logger.warning("Rejected Alexa request (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400, detail="Invalid Alexa request")
 
-    if request_type == "LaunchRequest":
-        return speech_response("مرحباً بك في مساعدك البحثي المنزلي المدعوم بـ جمناي. أنا جاهز لأي سؤال.", False)
+    req = data.get("request") or {}
+    request_type = req.get("type")
     if request_type == "SessionEndedRequest":
         return {}
-    if request_type == "IntentRequest":
-        intent = req.get("intent", {})
-        if intent.get("name") in ("AskGeminiIntent", "AMAZON.SearchIntent"):
-            question = (intent.get("slots", {}).get("question") or {}).get("value")
-            if not question:
-                return speech_response("عذراً، لم أسمع سؤالك بوضوح. أعد السؤال.", False)
-            if not api_key:
-                return speech_response("خدمة Gemini غير مهيأة حالياً.")
-            try:
-                answer = client.models.generate_content(
-                    model=MODEL_NAME,
-                    contents="أنت مساعد منزلي عبر أليكسا. أجب باختصار مناسب للصوت: " + question
-                ).text
-                return speech_response(answer or "لم أستلم إجابة.")
-            except Exception:
-                logger.exception("Alexa Gemini request failed")
-                return speech_response("عذراً، تعذر الوصول إلى Gemini الآن.")
-    return speech_response("عذراً، لم أفهم الطلب.")
 
-def speech_response(output_text, should_close=True):
-    return {"version": "1.0", "response": {
+    if request_type == "LaunchRequest":
+        return speech_response(
+            "مرحباً، تم فتح جيميناي. ما سؤالك؟",
+            should_close=False,
+            reprompt="اسألني سؤالاً، أو قل توقف.",
+        )
+
+    if request_type == "IntentRequest":
+        intent = req.get("intent") or {}
+        name = intent.get("name")
+        if name in ("AMAZON.StopIntent", "AMAZON.CancelIntent"):
+            return speech_response("إلى اللقاء.")
+        if name == "AMAZON.HelpIntent":
+            return speech_response(
+                "اسألني مثلاً: ما هي عاصمة اليابان؟",
+                should_close=False,
+                reprompt="ما سؤالك؟",
+            )
+        if name == "AskGeminiIntent":
+            slots = intent.get("slots") or {}
+            question = ((slots.get("question") or {}).get("value") or "").strip()
+            if not question:
+                return speech_response(
+                    "لم أسمع السؤال. حاول مرة أخرى.",
+                    should_close=False,
+                    reprompt="ما سؤالك؟",
+                )
+            if len(question) > 500:
+                return speech_response("اختصر سؤالك قليلاً.", False, "ما سؤالك؟")
+            if client is None:
+                return speech_response("خدمة جيميناي غير متاحة حالياً.")
+            try:
+                # Amazon allows roughly 8 seconds in total, including security checks.
+                result = await asyncio.wait_for(
+                    live_answer(question), timeout=5.5
+                )
+                transcript = (result.get("answer") or "").strip()
+                if not transcript:
+                    raise ValueError("Live response had audio but no transcription")
+                return speech_response(
+                    transcript[:2400],
+                    should_close=False,
+                    reprompt="هل عندك سؤال آخر؟",
+                )
+            except Exception:
+                logger.warning("Alexa Live response failed", exc_info=True)
+                return speech_response(
+                    "عذراً، تأخرت إجابة جيميناي. جرب سؤالاً أقصر.",
+                    should_close=False,
+                    reprompt="ما سؤالك التالي؟",
+                )
+
+    return speech_response("اسألني سؤالاً، أو قل توقف.", False, "ما سؤالك؟")
+
+
+def speech_response(output_text, should_close=True, reprompt=None):
+    response = {
         "outputSpeech": {"type": "PlainText", "text": output_text},
-        "shouldEndSession": should_close
-    }}
+        "shouldEndSession": should_close,
+    }
+    if not should_close and reprompt:
+        response["reprompt"] = {
+            "outputSpeech": {"type": "PlainText", "text": reprompt}
+        }
+    return {"version": "1.0", "response": response}
