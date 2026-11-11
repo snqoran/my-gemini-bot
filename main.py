@@ -1,6 +1,10 @@
 import os
 import hmac
 import logging
+import asyncio
+import base64
+import io
+import wave
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -25,7 +29,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}small{color:#566}
 <p>هذه صفحة اختبار خاصة، وليست مهارة Alexa النهائية.</p>
 <label>رمز الاختبار (TEST_CHAT_PIN)</label><input id="pin" type="password" autocomplete="off">
 <label>سؤالك</label><textarea id="q" rows="3" maxlength="500" placeholder="اكتب سؤالك هنا"></textarea>
-<button id="send">إرسال</button><pre id="out" role="status"></pre>
+<button id="send">إرسال نصياً</button><button id="live">تجربة Gemini Live بالصوت</button><pre id="out" role="status"></pre><audio id="player" controls style="width:100%;display:none"></audio>
 <small>إذا لم يتم إعداد TEST_CHAT_PIN في Render، فالمحادثة معطلة لحماية مفتاح Gemini.</small></main>
 <script>
 document.getElementById('send').onclick=async()=>{
@@ -34,6 +38,19 @@ document.getElementById('send').onclick=async()=>{
  const r=await fetch('/test-chat',{method:'POST',headers:{'Content-Type':'application/json'},
  body:JSON.stringify({pin:document.getElementById('pin').value,question:document.getElementById('q').value})});
  const data=await r.json();out.textContent=r.ok?data.answer:(data.detail||'حدث خطأ');
+ }catch(e){out.textContent='تعذر الاتصال بالخادم';}
+};
+
+document.getElementById('live').onclick=async()=>{
+ const out=document.getElementById('out'), player=document.getElementById('player');
+ out.textContent='جارٍ تجربة Gemini Live...';player.style.display='none';
+ try {
+ const r=await fetch('/test-live',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({pin:document.getElementById('pin').value,question:document.getElementById('q').value})});
+ const data=await r.json();
+ if(!r.ok){out.textContent=data.detail||'تعذرت التجربة';return;}
+ out.textContent=data.answer||'تم استلام الصوت، اضغط تشغيل.';
+ if(data.audio){player.src='data:audio/wav;base64,'+data.audio;player.style.display='block';}
  }catch(e){out.textContent='تعذر الاتصال بالخادم';}
 };
 </script></body></html>"""
@@ -68,6 +85,60 @@ async def test_chat(body: ChatInput):
     except Exception:
         logger.exception("Gemini request failed")
         raise HTTPException(status_code=502, detail="تعذر الاتصال بـ Gemini. راجع Render Logs.")
+
+
+async def live_answer(question: str):
+    pcm = bytearray()
+    transcript = []
+    async with client.aio.live.connect(
+        model="gemini-3.8-live",
+        config={"response_modalities": ["AUDIO"], "output_audio_transcription": {}},
+    ) as session:
+        await session.send_client_content(
+            turns={"role": "user", "parts": [{"text": "أجب باختصار شديد وبنفس اللغة: " + question}]},
+            turn_complete=True,
+        )
+        async for event in session.receive():
+            content = event.server_content
+            if content:
+                if content.output_transcription and content.output_transcription.text:
+                    transcript.append(content.output_transcription.text)
+                if content.model_turn:
+                    for part in content.model_turn.parts:
+                        if part.inline_data and part.inline_data.data:
+                            pcm.extend(part.inline_data.data)
+                            if len(pcm) > 3000000:
+                                raise ValueError("Audio too large")
+                if content.turn_complete:
+                    break
+    if not pcm:
+        raise ValueError("No audio returned")
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(bytes(pcm))
+    return {"answer": "".join(transcript), "audio": base64.b64encode(buffer.getvalue()).decode("ascii")}
+
+
+@app.post("/test-live", include_in_schema=False)
+async def test_live(body: ChatInput):
+    configured_pin = os.environ.get("TEST_CHAT_PIN", "")
+    if not configured_pin:
+        raise HTTPException(status_code=503, detail="رمز الاختبار غير معد")
+    if not hmac.compare_digest(body.pin.encode(), configured_pin.encode()):
+        raise HTTPException(status_code=401, detail="رمز الاختبار غير صحيح")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="مفتاح Gemini غير معد")
+    try:
+        return await asyncio.wait_for(live_answer(body.question), timeout=35)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="انتهت مهلة Gemini Live")
+    except Exception:
+        logger.exception("Gemini Live request failed")
+        raise HTTPException(status_code=502, detail="تعذرت تجربة Gemini Live؛ راجع سجلات Render.")
+
 
 @app.post("/alexa")
 async def alexa_skill(request: Request):
