@@ -4,15 +4,14 @@ import logging
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-import google.generativeai as genai
+from google import genai
 
 app = FastAPI(title="Gemini Alexa Bridge")
 logger = logging.getLogger(__name__)
 
 api_key = os.environ.get("GEMINI_API_KEY")
-if api_key:
-    genai.configure(api_key=api_key)
-model = genai.GenerativeModel("gemini-2.5-flash")
+client = genai.Client(api_key=api_key) if api_key else None
+MODEL_NAME = "gemini-3.8-flash"
 
 PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -61,8 +60,9 @@ async def test_chat(body: ChatInput):
     if not api_key:
         raise HTTPException(status_code=503, detail="مفتاح Gemini غير مُعدّ في الخادم")
     try:
-        answer = model.generate_content(
-            "أجب باختصار وبوضوح وبنفس لغة السؤال: " + body.question
+        answer = client.models.generate_content(
+            model=MODEL_NAME,
+            contents="أجب باختصار وبوضوح وبنفس لغة السؤال: " + body.question
         ).text
         return {"answer": answer or "لم أستلم إجابة نصية"}
     except Exception:
@@ -92,8 +92,9 @@ async def alexa_skill(request: Request):
             if not api_key:
                 return speech_response("خدمة Gemini غير مهيأة حالياً.")
             try:
-                answer = model.generate_content(
-                    "أنت مساعد منزلي عبر أليكسا. أجب باختصار مناسب للصوت: " + question
+                answer = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents="أنت مساعد منزلي عبر أليكسا. أجب باختصار مناسب للصوت: " + question
                 ).text
                 return speech_response(answer or "لم أستلم إجابة.")
             except Exception:
